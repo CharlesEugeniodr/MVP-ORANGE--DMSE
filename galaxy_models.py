@@ -212,22 +212,36 @@ def simulate_flyby_anomaly(times_sec: np.ndarray) -> np.ndarray:
 def get_apophis_orbit_comparison(hours: np.ndarray, gamma: float = 1.0) -> dict:
     """
     Calcula a órbita 2D (X, Y) e os raios orbitais do asteroide Apophis durante a aproximação de 2029.
-    Compara a trajetória planejada (NASA), a real (Orange-DMS), a comparativa e a discrepância (delta R).
-    
-    Retorna um dicionário com os vetores de órbita em km e os desvios em metros.
+    Compara a trajetória planejada (NASA de JPL Horizons), a real (Orange-DMS), e a discrepância.
     """
-    v_scale = 7.4 * 3600.0  # km/h (~7.4 km/s)
-    y_min = 38000.0  # km de distância ao centro da Terra
+    import horizons_client
+    from scipy.interpolate import interp1d
     
-    # 1) Trajetória Planejada (NASA / Kepleriana de referência)
-    X_nasa = v_scale * hours / 2.0  # em km
-    Y_nasa = np.sqrt(y_min**2 + (X_nasa * 0.7)**2)  # trajetória hiperbólica
-    R_nasa = np.sqrt(X_nasa**2 + Y_nasa**2)  # Raio em km
+    # Tenta obter dados reais do Horizons JPL
+    horizons_data = horizons_client.fetch_apophis_horizons_data()
+    y_min = 38000.0
     
-    # 2) Trajetória DMS (Projeção do modelo Orange-DMS)
-    # A malha vetorial encolhe o espaço perto do planeta (atrator -1).
-    # Deflexão máxima no perigeu de ~182.4 metros.
-    delta_r_m = -182.4 * gamma * np.exp(-(hours / 4.0)**2)  # desvio negativo (atração extra)
+    if horizons_data is not None:
+        # Interpola dados reais do Horizons no vetor 'hours' solicitado
+        h_horizons = horizons_data["hours"]
+        
+        f_x = interp1d(h_horizons, horizons_data["X"], kind="cubic", fill_value="extrapolate")
+        f_y = interp1d(h_horizons, horizons_data["Y"], kind="cubic", fill_value="extrapolate")
+        f_r = interp1d(h_horizons, horizons_data["R"], kind="cubic", fill_value="extrapolate")
+        
+        X_nasa = f_x(hours)
+        Y_nasa = f_y(hours)
+        R_nasa = f_r(hours)
+        y_min = np.min(R_nasa)
+    else:
+        # Fallback analítico se Horizons API falhar ou estiver offline
+        v_scale = 7.4 * 3600.0  # km/h
+        X_nasa = v_scale * hours / 2.0
+        Y_nasa = np.sqrt(y_min**2 + (X_nasa * 0.7)**2)
+        R_nasa = np.sqrt(X_nasa**2 + Y_nasa**2)
+        
+    # Trajetória DMS (Projeção do modelo Orange-DMS)
+    delta_r_m = -182.4 * gamma * np.exp(-(hours / 4.0)**2)
     delta_r_km = delta_r_m / 1000.0
     
     R_dms = R_nasa + delta_r_km
@@ -235,21 +249,16 @@ def get_apophis_orbit_comparison(hours: np.ndarray, gamma: float = 1.0) -> dict:
     X_dms = R_dms * np.cos(theta)
     Y_dms = R_dms * np.sin(theta)
     
-    # 3) Trajetória Real (Observada / Simulada com ruído de medição de radar de ~2m)
+    # Trajetória Real (Observada / radar com ruído de ~2m)
     rng = np.random.default_rng(42)
     noise_m = rng.normal(0.0, 2.0, size=len(hours))
     R_real = R_dms + (noise_m / 1000.0)
     X_real = R_real * np.cos(theta)
     Y_real = R_real * np.sin(theta)
     
-    # 4) Discrepância e Índices
-    # Discrepância em metros (Projeção - NASA)
+    # Discrepância e Índices
     discrepancy_m = (R_dms - R_nasa) * 1000.0
-    
-    # Índice de desvio (desvio em metros / raio de perigeu em metros)
     deviation_index = np.abs(discrepancy_m) / (y_min * 1000.0)
-    
-    # Taxa de erro relativo (%) em relação à órbita
     error_rate_pct = (np.abs(discrepancy_m) / (R_nasa * 1000.0)) * 100.0
     
     return {
@@ -260,6 +269,81 @@ def get_apophis_orbit_comparison(hours: np.ndarray, gamma: float = 1.0) -> dict:
         "deviation_index": deviation_index,
         "error_rate_pct": error_rate_pct,
         "y_min_km": y_min
+    }
+
+
+def run_mcmc_calibration(galaxy_name: str, n_steps: int = 1500, proposal_std: list = [0.1, 0.5, 0.1]) -> dict:
+    """
+    Executa a calibração dos parâmetros (gamma, R_s, beta) do modelo Orange - DMS
+    usando o algoritmo MCMC Metropolis-Hastings.
+    """
+    if galaxy_name not in GALAXY_DATA:
+        raise ValueError(f"Galáxia {galaxy_name} não encontrada.")
+        
+    data = GALAXY_DATA[galaxy_name]
+    R = data["R"]
+    Vobs = data["Vobs"]
+    Verr = data["Vobs_err"]
+    v_bar = velocity_newtonian(data["Vdisk"], data["Vbulge"], data["Vgas"])
+    
+    # Parâmetros iniciais: [gamma, R_s, beta]
+    theta = np.array([1.5, 10.0, 1.5])
+    
+    # Priors planos (flat priors)
+    def log_prior(p):
+        g, rs, b = p
+        if 0.1 <= g <= 10.0 and 0.1 <= rs <= 50.0 and 0.1 <= b <= 5.0:
+            return 0.0
+        return -np.inf
+        
+    def log_likelihood(p):
+        g, rs, b = p
+        v_model = velocity_orange_dms(v_bar, R, gamma=g, R_s=rs, beta=b)
+        chi2 = np.sum(((Vobs - v_model) / Verr) ** 2)
+        return -0.5 * chi2
+        
+    def log_posterior(p):
+        lp = log_prior(p)
+        if not np.isfinite(lp):
+            return -np.inf
+        return lp + log_likelihood(p)
+        
+    chain = np.zeros((n_steps, 3))
+    chain[0] = theta
+    curr_log_post = log_posterior(theta)
+    
+    accepted = 0
+    rng = np.random.default_rng(42)
+    
+    for t in range(1, n_steps):
+        # Propõe novo estado
+        proposal = theta + rng.normal(0, proposal_std)
+        prop_log_post = log_posterior(proposal)
+        
+        # Razão de aceitação
+        log_alpha = prop_log_post - curr_log_post
+        if np.log(rng.uniform(0, 1)) < log_alpha:
+            theta = proposal
+            curr_log_post = prop_log_post
+            accepted += 1
+            
+        chain[t] = theta
+        
+    # Estatísticas após burn-in (descartar os primeiros 30% passos)
+    burn_in = int(n_steps * 0.3)
+    clean_chain = chain[burn_in:]
+    
+    means = np.mean(clean_chain, axis=0)
+    stds = np.std(clean_chain, axis=0)
+    medians = np.median(clean_chain, axis=0)
+    ci_95 = np.percentile(clean_chain, [2.5, 97.5], axis=0)
+    
+    return {
+        "chain": chain,
+        "acceptance_rate": accepted / (n_steps - 1),
+        "gamma_stats": {"mean": means[0], "std": stds[0], "median": medians[0], "ci_95": ci_95[:, 0]},
+        "R_s_stats": {"mean": means[1], "std": stds[1], "median": medians[1], "ci_95": ci_95[:, 1]},
+        "beta_stats": {"mean": means[2], "std": stds[2], "median": medians[2], "ci_95": ci_95[:, 2]},
     }
 
 

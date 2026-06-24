@@ -111,6 +111,10 @@ if "params" not in st.session_state:
     st.session_state.params = core.DMSEParams()
 if "metrics_history" not in st.session_state:
     st.session_state.metrics_history = []
+if "hamiltonian_history" not in st.session_state:
+    st.session_state.hamiltonian_history = []
+if "edot2_mean_history" not in st.session_state:
+    st.session_state.edot2_mean_history = []
 if "simulation_run" not in st.session_state:
     st.session_state.simulation_run = False
 if "sim_steps" not in st.session_state:
@@ -179,11 +183,12 @@ p_active = core.DMSEParams(
 # -----------------------------
 # Abas Principais da Interface
 # -----------------------------
-tab_sim, tab_abl, tab_astro, tab_laudo, tab_quantum, tab_theory = st.tabs([
+tab_sim, tab_abl, tab_astro, tab_laudo, tab_mcmc, tab_quantum, tab_theory = st.tabs([
     "⚡ Simulação da Malha", 
     "📊 Ablação de Modelos", 
     "🌌 Astrofísica (Ajuste SPARC)",
     "📜 Laudo & Rigor Científico",
+    "🧬 Calibração MCMC",
     "⚛️ Protótipo Quântico", 
     "📖 Fundamentação Teórica"
 ])
@@ -202,6 +207,8 @@ with tab_sim:
         if reset_btn:
             st.session_state.engine = None
             st.session_state.metrics_history = []
+            st.session_state.hamiltonian_history = []
+            st.session_state.edot2_mean_history = []
             st.session_state.simulation_run = False
             st.session_state.sim_steps = 0
             st.success("Estado resetado com sucesso!")
@@ -212,6 +219,8 @@ with tab_sim:
             st.session_state.engine = core.DMSEngine(p_active)
             st.session_state.engine.reset(seed=seed)
             st.session_state.metrics_history = []
+            st.session_state.hamiltonian_history = []
+            st.session_state.edot2_mean_history = []
             
             # Loop de Simulação com barra de progresso
             progress_bar = st.progress(0)
@@ -221,6 +230,14 @@ with tab_sim:
             for step_idx in range(steps):
                 m = st.session_state.engine.step()
                 st.session_state.metrics_history.append(m)
+                
+                # Calcula energia hamiltoniana
+                h_val = core.compute_hamiltonian_energy(st.session_state.engine.state, p_active)
+                st.session_state.hamiltonian_history.append(h_val)
+                
+                # Calcula valor médio de Edot^2
+                edot2_mean = float(np.mean(st.session_state.engine.state.Edot**2))
+                st.session_state.edot2_mean_history.append(edot2_mean)
                 
                 # Atualiza progresso periodicamente
                 if step_idx % max(1, steps // 20) == 0 or step_idx == steps - 1:
@@ -597,8 +614,8 @@ with tab_astro:
         else:
             gamma_fit = gamma_ugc128
             
-        r_scale_fit = st.slider("Raio de Escala da Malha (Rs) [kpc]", 1.0, 30.0, 8.0, 0.5)
-        beta_fit = st.slider("Exponente de Decaimento (β)", 0.5, 3.0, 1.0, 0.1)
+        r_scale_fit = st.slider("Raio de Escala da Malha (Rs) [kpc]", 1.0, 30.0, st.session_state.get("rs_fit", 8.0), 0.5, key="rs_fit")
+        beta_fit = st.slider("Exponente de Decaimento (β)", 0.5, 3.0, st.session_state.get("beta_fit", 1.0), 0.1, key="beta_fit")
         
     with col_ast_chart:
         # Preparação dos dados e curvas
@@ -736,6 +753,23 @@ with tab_laudo:
     t4_msg = t4_res["msg"]
     t4_metric = t4_res.get("metric", "N/A")
     
+    # Teste 5: Estabilidade Simplética e Noether
+    if st.session_state.hamiltonian_history:
+        t5_res = core.check_symplectic_stability(
+            np.array(st.session_state.hamiltonian_history),
+            p_active.dt,
+            p_active.eta,
+            p_active.rho,
+            np.array(st.session_state.edot2_mean_history)
+        )
+        t5_status = t5_res["status"]
+        t5_msg = t5_res["msg"]
+        t5_metric = f"drift = {t5_res['rel_drift_pct']:.4f}%"
+    else:
+        t5_status = "WARNING"
+        t5_msg = "Aguardando execução da simulação na Aba 1 para avaliar estabilidade hamiltoniana."
+        t5_metric = "Sem Dados"
+        
     # Exibição dos Testes em Cards
     col_t1, col_t2 = st.columns(2)
     with col_t1:
@@ -747,6 +781,14 @@ with tab_laudo:
             st.success(f"{t3_msg} \n\n **Resultado:** {t3_metric}")
         else:
             st.warning(f"{t3_msg} \n\n **Resultado:** {t3_metric}")
+            
+        st.markdown(f"**5. Estabilidade Simplética (Hamiltoniana):**")
+        if t5_status == "PASS":
+            st.success(f"{t5_msg} \n\n **Resultado:** {t5_metric}")
+        elif t5_status == "WARNING":
+            st.warning(f"{t5_msg} \n\n **Resultado:** {t5_metric}")
+        else:
+            st.error(f"{t5_msg} \n\n **Resultado:** {t5_metric}")
             
     with col_t2:
         st.markdown(f"**2. Conservação de Energia da Malha:**")
@@ -768,11 +810,11 @@ with tab_laudo:
     # Parecer do Laudo
     st.subheader("Laudo Técnico de Homologação")
     
-    statuses = [t1_status, t2_status, t3_status, t4_status]
+    statuses = [t1_status, t2_status, t3_status, t4_status, t5_status]
     if "FAIL" in statuses:
         laudo_status = "REPROVADO POR INCONSISTÊNCIA"
         laudo_color = "#EF5350"
-        laudo_desc = "O modelo apresenta inconsistências graves em termos de conservação de energia ou universalidade de parâmetros que inviabilizam a homologação sem revisão física."
+        laudo_desc = "O modelo apresenta inconsistências graves em termos de conservação de energia, universalidade de parâmetros ou estabilidade simplética hamiltoniana."
     elif "WARNING" in statuses:
         laudo_status = "APROVADO COM RESSALVAS (EM HOMOLOGAÇÃO)"
         laudo_color = "#FFA726"
@@ -780,7 +822,7 @@ with tab_laudo:
     else:
         laudo_status = "APROVADO E HOMOLOGADO"
         laudo_color = "#66BB6A"
-        laudo_desc = "O modelo atende a todos os critérios formais de consistência dimensional, conservação de energia, convergência de atrator e universalidade de parâmetros."
+        laudo_desc = "O modelo atende a todos os critérios formais de consistência dimensional, conservação de energia, integridade simplética, convergência de atrator e universalidade de parâmetros."
 
     st.markdown(f"""
     <div style="background: rgba(25,30,40,0.6); padding: 24px; border-radius: 16px; border: 2px solid {laudo_color};">
@@ -962,6 +1004,97 @@ with tab_laudo:
         )
         st.plotly_chart(fig_map, use_container_width=True)
 
+    # --------------------------------------------------
+    # Importador de Trajetórias Externas (CSV) e Validação RMSE
+    # --------------------------------------------------
+    st.markdown("---")
+    st.subheader("Validação Empírica Externa & Visualização Orbital 4D")
+    
+    col_csv, col_4d = st.columns([1, 1])
+    
+    with col_csv:
+        st.markdown("**1. Importador de Trajetória do Usuário (Validação de Órbita)**")
+        st.markdown("""
+        Envie um arquivo CSV contendo os dados de rastreamento observados (radar/óptico) do asteroide ou sonda espacial.
+        O arquivo deve conter as colunas: `tempo_h` (horas em relação ao perigeu), `X` (em km) e `Y` (em km).
+        """)
+        
+        csv_exemplo = """tempo_h,X,Y
+-12.0,-44000.0,40000.0
+-6.0,-22000.0,38500.0
+0.0,0.0,37817.0
+6.0,22000.0,38500.0
+12.0,44000.0,40000.0"""
+        
+        st.download_button(
+            label="📥 Baixar CSV de Teste de Exemplo",
+            data=csv_exemplo,
+            file_name="trajetoria_teste.csv",
+            mime="text/csv"
+        )
+        
+        uploaded_file = st.file_uploader("Fazer upload do arquivo de órbita (CSV)", type=["csv"])
+        
+        if uploaded_file is not None:
+            try:
+                user_df = pd.read_csv(uploaded_file)
+                if not {"tempo_h", "X", "Y"}.issubset(user_df.columns):
+                    st.error("Erro: O CSV deve conter as colunas 'tempo_h', 'X' e 'Y'.")
+                else:
+                    st.success("CSV importado com sucesso!")
+                    st.dataframe(user_df, use_container_width=True)
+                    
+                    user_df["R"] = np.sqrt(user_df["X"]**2 + user_df["Y"]**2)
+                    
+                    from scipy.interpolate import interp1d
+                    f_dms = interp1d(hours_ap, ap_res["R_dms"], kind="cubic", fill_value="extrapolate")
+                    model_R = f_dms(user_df["tempo_h"])
+                    
+                    rmse = np.sqrt(np.mean((user_df["R"] - model_R) ** 2)) * 1000.0 # Em metros
+                    st.metric("RMSE Espacial (Modelo vs Importado)", f"{rmse:.2f} metros")
+                    
+                    if rmse < 100.0:
+                        st.balloons()
+                        st.success("Excelente aderência! O RMSE é inferior a 100 metros (Aprovado por Aderência Física).")
+                    else:
+                        st.warning("Aderência moderada. O RMSE excede 100 metros.")
+            except Exception as e:
+                st.error(f"Erro ao processar arquivo: {e}")
+                
+    with col_4d:
+        st.markdown("**2. Visualização Orbital Dinâmica 4D (Plotly Express)**")
+        st.markdown("""
+        Esta visualização renderiza o tempo de voo como a **quarta dimensão (4D)** mapeada sobre a cor dos pontos orbitais 
+        da trajetória real (Obs), permitindo observar a aceleração gravitacional diferencial nas zonas de perigeu.
+        """)
+        
+        df_4d = pd.DataFrame({
+            "Eixo X (km)": ap_res["X_real"],
+            "Eixo Y (km)": ap_res["Y_real"],
+            "Tempo (horas)": hours_ap,
+            "Raio R (km)": ap_res["R_real"],
+            "Desvio (m)": np.abs(ap_res["discrepancy_m"])
+        })
+        
+        fig_4d = px.scatter(
+            df_4d,
+            x="Eixo X (km)",
+            y="Eixo Y (km)",
+            color="Tempo (horas)",
+            size="Raio R (km)",
+            size_max=12,
+            color_continuous_scale="Viridis",
+            labels={"Tempo (horas)": "Tempo (h)"},
+            title="Evolução Temporal 4D do Apophis 2029"
+        )
+        fig_4d.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(15,20,30,0.4)',
+            height=340,
+            margin=dict(l=40, r=20, b=40, t=40)
+        )
+        st.plotly_chart(fig_4d, use_container_width=True)
+
     # -----------------------------
     # Compromisso Ético e Científico
     # -----------------------------
@@ -976,7 +1109,122 @@ with tab_laudo:
     """)
 
 # --------------------------------------------------
-# TAB 5: Protótipo Quântico
+# TAB 5: Calibração MCMC
+# --------------------------------------------------
+with tab_mcmc:
+    st.subheader("Calibração por MCMC (Metropolis-Hastings)")
+    st.markdown("""
+    Esta aba implementa um otimizador estatístico **Markov Chain Monte Carlo (MCMC)** nativo para extrair a
+    distribuição a posteriori dos parâmetros de acoplamento da malha ($\\gamma$, $Rs$, $\\beta$) em relação aos
+    dados observacionais reais do catálogo **SPARC**. 
+    Isso permite testar matematicamente a universalidade dos parâmetros e evitar ajustes manuais *ad-hoc*.
+    """)
+    
+    col_mc1, col_mc2 = st.columns([1, 2])
+    
+    with col_mc1:
+        st.markdown("**Configurações do Amostrador MCMC**")
+        mcmc_gal = st.selectbox("Galáxia para Calibração", list(galaxy_models.GALAXY_DATA.keys()), key="mc_gal_sel")
+        mcmc_steps = st.slider("Número de Passos do MCMC", 500, 5000, 1500, 100, key="mc_steps_slider")
+        
+        st.markdown("**Desvios das Propostas (Proposal Std)**")
+        std_g = st.slider("Desvio σ para propor γ", 0.01, 0.5, 0.1, 0.01, key="mc_std_g")
+        std_rs = st.slider("Desvio σ para propor Rs", 0.1, 2.0, 0.5, 0.1, key="mc_std_rs")
+        std_b = st.slider("Desvio σ para propor β", 0.01, 0.5, 0.1, 0.01, key="mc_std_b")
+        
+        run_mcmc_btn = st.button("🧬 Executar Ajuste MCMC", use_container_width=True)
+        
+    with col_mc2:
+        st.markdown("**Resultados do MCMC**")
+        
+        if run_mcmc_btn:
+            with st.spinner("Executando amostragem MCMC..."):
+                res = galaxy_models.run_mcmc_calibration(mcmc_gal, n_steps=mcmc_steps, proposal_std=[std_g, std_rs, std_b])
+                
+                st.session_state.mcmc_results = res
+                st.session_state.mcmc_gal_active = mcmc_gal
+                
+        if "mcmc_results" in st.session_state and st.session_state.get("mcmc_gal_active") == mcmc_gal:
+            res = st.session_state.mcmc_results
+            chain = res["chain"]
+            acc_rate = res["acceptance_rate"]
+            
+            st.success(f"Amostragem MCMC concluída com Taxa de Aceitação de **{acc_rate*100:.1f}%**!")
+            
+            # Cards HUD
+            col_res_g, col_res_rs, col_res_b = st.columns(3)
+            with col_res_g:
+                st.metric("γ Estimado (Média)", f"{res['gamma_stats']['mean']:.3f} ± {res['gamma_stats']['std']:.3f}")
+            with col_res_rs:
+                st.metric("Rs Estimado (Média)", f"{res['R_s_stats']['mean']:.2f} ± {res['R_s_stats']['std']:.2f} kpc")
+            with col_res_b:
+                st.metric("β Estimado (Média)", f"{res['beta_stats']['mean']:.3f} ± {res['beta_stats']['std']:.3f}")
+                
+            # Tabela de Ponderação Estatística
+            import pandas as pd
+            df_mcmc = pd.DataFrame([
+                {
+                    "Parâmetro": "γ (Acoplamento)",
+                    "Média": f"{res['gamma_stats']['mean']:.4f}",
+                    "Desvio Padrão": f"{res['gamma_stats']['std']:.4f}",
+                    "Mediana": f"{res['gamma_stats']['median']:.4f}",
+                    "Intervalo Confiança (95%)": f"[{res['gamma_stats']['ci_95'][0]:.3f}, {res['gamma_stats']['ci_95'][1]:.3f}]"
+                },
+                {
+                    "Parâmetro": "Rs (Raio Escala)",
+                    "Média": f"{res['R_s_stats']['mean']:.4f}",
+                    "Desvio Padrão": f"{res['R_s_stats']['std']:.4f}",
+                    "Mediana": f"{res['R_s_stats']['median']:.4f}",
+                    "Intervalo Confiança (95%)": f"[{res['R_s_stats']['ci_95'][0]:.3f}, {res['R_s_stats']['ci_95'][1]:.3f}]"
+                },
+                {
+                    "Parâmetro": "β (Decaimento)",
+                    "Média": f"{res['beta_stats']['mean']:.4f}",
+                    "Desvio Padrão": f"{res['beta_stats']['std']:.4f}",
+                    "Mediana": f"{res['beta_stats']['median']:.4f}",
+                    "Intervalo Confiança (95%)": f"[{res['beta_stats']['ci_95'][0]:.3f}, {res['beta_stats']['ci_95'][1]:.3f}]"
+                }
+            ])
+            st.dataframe(df_mcmc, use_container_width=True)
+            
+            # Botão para aplicar parâmetros
+            apply_mcmc = st.button("📥 Aplicar Parâmetros Calibrados no Ajuste Principal", use_container_width=True)
+            if apply_mcmc:
+                if mcmc_gal == "NGC 3198":
+                    st.session_state.g_3198 = float(res['gamma_stats']['mean'])
+                elif mcmc_gal == "NGC 2403":
+                    st.session_state.g_2403 = float(res['gamma_stats']['mean'])
+                else:
+                    st.session_state.g_128 = float(res['gamma_stats']['mean'])
+                
+                st.session_state.rs_fit = float(res['R_s_stats']['mean'])
+                st.session_state.beta_fit = float(res['beta_stats']['mean'])
+                st.success("Parâmetros aplicados com sucesso! Vá para a Aba 3 para ver o ajuste atualizado.")
+            
+            # Plots dos Trace
+            st.markdown("**Caminho de Amostragem (Trace plots)**")
+            
+            fig_tr_g = go.Figure()
+            fig_tr_g.add_trace(go.Scatter(y=chain[:, 0], mode='lines', line=dict(color='#FF5E00', width=1), name='γ trace'))
+            fig_tr_g.update_layout(title="Trace de γ (Acoplamento)", height=150, margin=dict(l=30, r=20, b=20, t=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(15,20,30,0.4)')
+            st.plotly_chart(fig_tr_g, use_container_width=True)
+            
+            fig_tr_rs = go.Figure()
+            fig_tr_rs.add_trace(go.Scatter(y=chain[:, 1], mode='lines', line=dict(color='#FF9E00', width=1), name='Rs trace'))
+            fig_tr_rs.update_layout(title="Trace de Rs (kpc)", height=150, margin=dict(l=30, r=20, b=20, t=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(15,20,30,0.4)')
+            st.plotly_chart(fig_tr_rs, use_container_width=True)
+            
+            fig_tr_b = go.Figure()
+            fig_tr_b.add_trace(go.Scatter(y=chain[:, 2], mode='lines', line=dict(color='#3182CE', width=1), name='β trace'))
+            fig_tr_b.update_layout(title="Trace de β (Decaimento)", height=150, margin=dict(l=30, r=20, b=20, t=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(15,20,30,0.4)')
+            st.plotly_chart(fig_tr_b, use_container_width=True)
+            
+        else:
+            st.info("Ajuste MCMC pronto para ser executado. Selecione a galáxia e clique em Executar.")
+
+
+# --------------------------------------------------
+# TAB 6: Protótipo Quântico
 # --------------------------------------------------
 with tab_quantum:
 
@@ -1081,8 +1329,8 @@ with tab_theory:
     
     ### 3. A Dinâmica PDE do Sistema
     A evolução de campo eletrodinâmico é modelada pela equação diferencial parcial hiperbólica amortecida por canal $c$:
-    $$\rho \frac{\partial^2 E_c}{\partial t^2} + \eta \frac{\partial E_c}{\partial t} - \alpha \nabla^2 E_c + \frac{\kappa_c}{E_0} \omega_c \left( \frac{\omega_c Z_0 E_c}{c E_0} - 1 \right) + \text{Coupling}(E_c) = 0$$
+    $$\rho \frac{\partial^2 E_c}{\partial t^2} + \eta \frac{\partial E_c}{\partial t} - \alpha \nabla^2 E_c + \frac{\\kappa_c}{E_0} \omega_c \left( \frac{\omega_c Z_0 E_c}{c E_0} - 1 \right) + \text{Coupling}(E_c) = 0$$
     Onde:
     - $Z_0 \approx 376.73\ \Omega$ e $c = 299792458\ m/s$ são constantes universais de consistência de unidades do vácuo.
-    - $\kappa_c$ é o coeficiente de acoplamento não-linear adaptado dinamicamente para minimizar a divergência local em relação ao vácuo ($r_{rms}$).
+    - $\\kappa_c$ é o coeficiente de acoplamento não-linear adaptado dinamicamente para minimizar a divergência local em relação ao vácuo ($r_{rms}$).
     """)

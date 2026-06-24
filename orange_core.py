@@ -204,6 +204,75 @@ def adapt_kappa(kappa: float, r_rms: float, p: DMSEParams) -> float:
     k_new = kappa * (1.0 + delta)
     return float(np.clip(k_new, p.kappa_min, p.kappa_max))
 
+
+def compute_hamiltonian_energy(state: DMSEState, p: DMSEParams) -> float:
+    """
+    Calcula a energia hamiltoniana do sistema:
+    H = T (cinética) + V_grad (gradiente espacial) + V_NL (potencial não-linear do atrator)
+    """
+    E, Edot, omega = state.E, state.Edot, state.omega_tilde
+    C, H, W = E.shape
+    N = int(C * H * W)
+    
+    # Energia Cinética T = 0.5 * rho * ||Edot||^2
+    T = 0.5 * p.rho * np.sum(Edot * Edot)
+    
+    # Energia de Gradiente V_grad = 0.5 * alpha * ||∇E||^2
+    dEy = np.empty_like(E); dEx = np.empty_like(E)
+    dEy[:, 1:] = E[:, 1:] - E[:, :-1]; dEy[:, :1] = 0.0
+    dEx[:, :, 1:] = E[:, :, 1:] - E[:, :, :-1]; dEx[:, :, :1] = 0.0
+    grad2 = (dEy**2 + dEx**2) / (p.dx * p.dx)
+    V_grad = 0.5 * p.alpha * np.sum(grad2)
+    
+    # Potencial não-linear V_NL
+    factor1 = (omega * Z0_VACUUM * (E**2)) / (2.0 * C_LIGHT * p.E0)
+    V_NL = np.sum((state.kappa / p.E0) * omega * (factor1 - E))
+    
+    return float((T + V_grad + V_NL) / N)
+
+
+def check_symplectic_stability(energies: np.ndarray, dt: float, eta: float, rho: float, edot_squared_mean: np.ndarray) -> dict:
+    """
+    Avalia a estabilidade simplética calculando o desvio em relação ao decaimento teórico de energia.
+    dH/dt = -eta * ||Edot||^2 / N
+    """
+    n_steps = len(energies)
+    if n_steps < 10:
+        return {"status": "INSUFFICIENT_DATA", "msg": "Dados insuficientes para análise hamiltoniana.", "rel_drift_pct": 0.0}
+        
+    expected_decay = 0.0
+    expected_energies = [energies[0]]
+    
+    for t in range(1, n_steps):
+        # Dissipação no intervalo: -eta * mean(Edot^2) * dt
+        diss = -eta * edot_squared_mean[t] * dt
+        expected_decay += diss
+        expected_energies.append(energies[0] + expected_decay)
+        
+    expected_energies = np.array(expected_energies)
+    
+    drift = energies - expected_energies
+    max_drift = np.max(np.abs(drift))
+    rel_drift = max_drift / max(np.abs(energies[0]), 1e-6)
+    
+    if rel_drift > 0.20:
+        status = "FAIL"
+        msg = f"Instabilidade Simplética! Drift de energia residual de {rel_drift*100:.2f}% excede a tolerância de 20%."
+    elif rel_drift > 0.05:
+        status = "WARNING"
+        msg = f"Estabilidade limite: desvio de energia residual acumulada de {rel_drift*100:.2f}%."
+    else:
+        status = "PASS"
+        msg = f"Conservação simplética rigorosa: desvio hamiltoniano de apenas {rel_drift*100:.3f}%."
+        
+    return {
+        "status": status,
+        "msg": msg,
+        "rel_drift_pct": float(rel_drift * 100),
+        "actual_energies": energies.tolist(),
+        "expected_energies": expected_energies.tolist()
+    }
+
 # ------------------------------
 # 6) Engine principal
 # ------------------------------
