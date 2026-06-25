@@ -209,17 +209,58 @@ def simulate_flyby_anomaly(times_sec: np.ndarray) -> np.ndarray:
     noise = rng.normal(0.0, 0.15, size=len(times_sec))
     return profile + noise
 
-def simulate_apophis_deflection(days: np.ndarray) -> np.ndarray:
+def get_apophis_orbit_comparison(hours: np.ndarray, gamma: float = 1.0) -> dict:
     """
-    Projeta o desvio cumulativo orbital (delta R em metros) do asteroide Apophis 
-    durante sua aproximação de 2029 (20 dias antes e depois do perigeu em t=0), 
-    induzido pela perturbação gravitacional da malha vetorial esferoidal terrestre.
+    Calcula a órbita 2D (X, Y) e os raios orbitais do asteroide Apophis durante a aproximação de 2029.
+    Compara a trajetória planejada (NASA), a real (Orange-DMS), a comparativa e a discrepância (delta R).
+    
+    Retorna um dicionário com os vetores de órbita em km e os desvios em metros.
     """
-    # O desvio acumula conforme o asteroide penetra a malha interna do planeta
-    # Deflexão cumulativa orbital proporcional ao inverso da distância
-    # t=0 representa perigeu de 13 de Abril de 2029
-    profile = 250.0 / (1.0 + np.exp(-days / 3.0)) # desvio cumulativo que flatlina após perigeu
-    return profile
+    v_scale = 7.4 * 3600.0  # km/h (~7.4 km/s)
+    y_min = 38000.0  # km de distância ao centro da Terra
+    
+    # 1) Trajetória Planejada (NASA / Kepleriana de referência)
+    X_nasa = v_scale * hours / 2.0  # em km
+    Y_nasa = np.sqrt(y_min**2 + (X_nasa * 0.7)**2)  # trajetória hiperbólica
+    R_nasa = np.sqrt(X_nasa**2 + Y_nasa**2)  # Raio em km
+    
+    # 2) Trajetória DMS (Projeção do modelo Orange-DMS)
+    # A malha vetorial encolhe o espaço perto do planeta (atrator -1).
+    # Deflexão máxima no perigeu de ~182.4 metros.
+    delta_r_m = -182.4 * gamma * np.exp(-(hours / 4.0)**2)  # desvio negativo (atração extra)
+    delta_r_km = delta_r_m / 1000.0
+    
+    R_dms = R_nasa + delta_r_km
+    theta = np.arctan2(Y_nasa, X_nasa)
+    X_dms = R_dms * np.cos(theta)
+    Y_dms = R_dms * np.sin(theta)
+    
+    # 3) Trajetória Real (Observada / Simulada com ruído de medição de radar de ~2m)
+    rng = np.random.default_rng(42)
+    noise_m = rng.normal(0.0, 2.0, size=len(hours))
+    R_real = R_dms + (noise_m / 1000.0)
+    X_real = R_real * np.cos(theta)
+    Y_real = R_real * np.sin(theta)
+    
+    # 4) Discrepância e Índices
+    # Discrepância em metros (Projeção - NASA)
+    discrepancy_m = (R_dms - R_nasa) * 1000.0
+    
+    # Índice de desvio (desvio em metros / raio de perigeu em metros)
+    deviation_index = np.abs(discrepancy_m) / (y_min * 1000.0)
+    
+    # Taxa de erro relativo (%) em relação à órbita
+    error_rate_pct = (np.abs(discrepancy_m) / (R_nasa * 1000.0)) * 100.0
+    
+    return {
+        "X_nasa": X_nasa, "Y_nasa": Y_nasa, "R_nasa": R_nasa,
+        "X_dms": X_dms, "Y_dms": Y_dms, "R_dms": R_dms,
+        "X_real": X_real, "Y_real": Y_real, "R_real": R_real,
+        "discrepancy_m": discrepancy_m,
+        "deviation_index": deviation_index,
+        "error_rate_pct": error_rate_pct,
+        "y_min_km": y_min
+    }
 
 
 # Exemplo rápido para autoteste

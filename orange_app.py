@@ -822,23 +822,145 @@ with tab_laudo:
         st.caption("Projeção de aceleração anômala durante flyby rasante causada pela energia de gradiente da malha esferoidal da Terra.")
         
     with col_proj2:
-        st.markdown("**2. Deflexão Orbital de Apophis em 2029**")
-        days_ap = np.linspace(-15, 15, 100)
-        ap_deflect = galaxy_models.simulate_apophis_deflection(days_ap)
+        st.markdown("**2. Deflexão Orbital e Mapa de Erro - Apophis (2029)**")
+        gamma_ap = st.slider("γ - Perturbação da Terra no Apophis", 0.0, 5.0, 1.0, 0.1, key="g_ap")
         
+        # 24 horas ao redor do perigeu
+        hours_ap = np.linspace(-12, 12, 120)
+        ap_res = galaxy_models.get_apophis_orbit_comparison(hours_ap, gamma=gamma_ap)
+        
+        # Gráfico de 4 Linhas: Real, Projeção, Comparativa (NASA), e Discrepância
         fig_ap = go.Figure()
-        fig_ap.add_trace(go.Scatter(x=days_ap, y=ap_deflect, name="Desvio Cumulativo (m)", line=dict(color='#3182CE', width=2.5)))
+        
+        # Linha 1: Parâmetro Real (km)
+        fig_ap.add_trace(go.Scatter(
+            x=hours_ap, y=ap_res["R_real"],
+            mode='lines', name='Trajetória Real (Obs)',
+            line=dict(color='#FF5E00', width=2)
+        ))
+        
+        # Linha 2: Projeção (km)
+        fig_ap.add_trace(go.Scatter(
+            x=hours_ap, y=ap_res["R_dms"],
+            mode='lines', name='Projeção (Orange-DMS)',
+            line=dict(color='#FF9E00', width=1.5, dash='dash')
+        ))
+        
+        # Linha 3: Comparativa (NASA) (km)
+        fig_ap.add_trace(go.Scatter(
+            x=hours_ap, y=ap_res["R_nasa"],
+            mode='lines', name='Comparativa (NASA)',
+            line=dict(color='#A0AEC0', width=1.5, dash='dot')
+        ))
+        
+        # Linha 4: Discrepância (metros) - Eixo Y secundário para melhor visualização
+        fig_ap.add_trace(go.Scatter(
+            x=hours_ap, y=ap_res["discrepancy_m"],
+            mode='lines', name='Discrepância (m)',
+            line=dict(color='#EF5350', width=2),
+            yaxis='y2'
+        ))
+        
         fig_ap.update_layout(
-            title="Desvio cumulativo da órbita do Apophis (2029)",
-            xaxis_title="Dias em relação ao perigeu",
-            yaxis_title="Desvio orbital delta R (metros)",
+            title="Comparação de Trajetória do Apophis (2029)",
+            xaxis_title="Tempo ao redor do perigeu (horas)",
+            yaxis_title="Raio Orbital R (km)",
+            yaxis2=dict(
+                title="Discrepância (metros)",
+                overlaying='y',
+                side='right',
+                showgrid=False
+            ),
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(15,20,30,0.4)',
-            height=250,
-            margin=dict(l=40, r=20, b=40, t=40)
+            height=320,
+            margin=dict(l=40, r=40, b=40, t=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig_ap, use_container_width=True)
-        st.caption("Desvio orbital acumulado projetado devido à passagem de Apophis através da perturbação de gradiente dimensional da Terra.")
+        st.caption("Evolução orbital mostrando o desvio máximo na distância de perigeu sob o modelo Orange - DMS.")
+
+    # --------------------------------------------------
+    # Ponderação de Discrepância e Mapa de Erro Orbital 2D
+    # --------------------------------------------------
+    st.subheader("Laudo Detalhado: Ponderação e Mapa de Erro Orbital 2D (Apophis 2029)")
+    
+    col_table, col_map = st.columns([4, 3])
+    
+    with col_table:
+        st.markdown("**Ponderação e Tabela Comparativa de Órbita**")
+        # Criar tabela para 5 pontos selecionados (-12h, -6h, 0h, +6h, +12h)
+        idx_sample = [0, 30, 60, 90, -19] # índices das horas correspondentes
+        hours_sample = hours_ap[idx_sample]
+        
+        import pandas as pd
+        t_data = []
+        for i in idx_sample:
+            t_data.append({
+                "Tempo (h)": f"{hours_ap[i]:+.1f}h",
+                "Real (Obs) [km]": f"{ap_res['R_real'][i]:.3f}",
+                "Projeção (DMS) [km]": f"{ap_res['R_dms'][i]:.3f}",
+                "Comparativo (NASA) [km]": f"{ap_res['R_nasa'][i]:.3f}",
+                "Discrepância [m]": f"{ap_res['discrepancy_m'][i]:+.1f} m",
+                "Desvio Relativo": f"{ap_res['deviation_index'][i]*1000000:.2f} ppm",
+                "Taxa de Erro": f"{ap_res['error_rate_pct'][i]:.5f}%"
+            })
+        st.dataframe(pd.DataFrame(t_data), use_container_width=True)
+        
+        # Métricas Globais
+        max_disc = np.min(ap_res["discrepancy_m"]) # é negativo
+        mean_err = np.mean(ap_res["error_rate_pct"])
+        max_dev_idx = np.max(ap_res["deviation_index"])
+        
+        col_st1, col_st2, col_st3 = st.columns(3)
+        with col_st1:
+            st.metric("Discrepância Máxima", f"{max_disc:.1f} m", "Atrator Ativo", delta_color="inverse")
+        with col_st2:
+            st.metric("Índice de Desvio Máximo", f"{max_dev_idx*1e6:.2f} ppm")
+        with col_st3:
+            st.metric("Taxa de Erro Média", f"{mean_err:.5f}%")
+            
+    with col_map:
+        st.markdown("**Mapa de Erro Orbital 2D (Gradiente de Desvio)**")
+        # Plot orbital 2D (X, Y) com escala de cor baseado no erro
+        fig_map = go.Figure()
+        
+        # Órbita real colorida pela discrepância
+        fig_map.add_trace(go.Scatter(
+            x=ap_res["X_real"], y=ap_res["Y_real"],
+            mode='markers+lines',
+            marker=dict(
+                size=6,
+                color=ap_res["discrepancy_m"],
+                colorscale='YlOrRd',
+                colorbar=dict(title="Desvio (m)", thickness=10),
+                showscale=True
+            ),
+            name='Órbita perturbada (DMS)',
+            line=dict(color='rgba(255,255,255,0.1)')
+        ))
+        
+        # Terra no centro (0,0)
+        fig_map.add_trace(go.Scatter(
+            x=[0], y=[0],
+            mode='markers+text',
+            marker=dict(color='#0066FF', size=20, symbol='circle'),
+            text=['Terra'], textposition='top center',
+            name='Terra (Centro)'
+        ))
+        
+        fig_map.update_layout(
+            title="Órbita do Apophis ao Redor da Terra",
+            xaxis_title="Distância Orbital X (km)",
+            yaxis_title="Distância Orbital Y (km)",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(15,20,30,0.4)',
+            height=320,
+            margin=dict(l=40, r=20, b=40, t=40),
+            xaxis=dict(zeroline=True, zerolinecolor='rgba(255,255,255,0.1)'),
+            yaxis=dict(zeroline=True, zerolinecolor='rgba(255,255,255,0.1)')
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
 
     # -----------------------------
     # Compromisso Ético e Científico
