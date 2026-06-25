@@ -288,7 +288,10 @@ export function pdeStep(E, E_prev, E_lap, coupling, kappa, p) {
 
     // Residual & nonlinear attractor
     const r     = residualR(e, E0);
-    const omega = Math.abs(e);
+    // omega floor: prevents attractor from vanishing at E≈0
+    // "O ser é vibração que resistiu ao colapso" — the attractor
+    // must remain active even when the field is weak
+    const omega = Math.max(Math.abs(e), 0.1 * E0);
     const nl    = nonlinearAttractor(kappa, E0, omega, r);
 
     // Diffusion
@@ -469,12 +472,18 @@ export class DMSEngine {
     const rng = makeRng(seed);
     const s   = this.state;
 
+    // "Existir é ter direção" — each channel starts near the
+    // equilibrium ±E0, already oriented. The engine's job is to
+    // REFINE and STABILIZE, not to create from void.
+    // Even channels → +E0, odd channels → −E0 (conjugate pairs)
     for (let d = 0; d < p.n_channels; d++) {
+      const direction = (d % 2 === 0) ? 1.0 : -1.0;
       for (let i = 0; i < s.N; i++) {
-        // Seed with ±10% of E0 to give the attractor something to work with
-        const noise = (rng() - 0.5) * 0.2 * p.E0;
-        s.E[d][i]      = noise;
-        s.E_prev[d][i] = noise;
+        // Start at ±E0 with ±5% spatial noise
+        const noise = (rng() - 0.5) * 0.1 * p.E0;
+        const value = direction * p.E0 + noise;
+        s.E[d][i]      = value;
+        s.E_prev[d][i] = value;
       }
     }
   }
